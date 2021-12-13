@@ -405,6 +405,7 @@ neo4j = ['neo4j>=4.2.1']
 odbc = [
     'pyodbc',
 ]
+opsgenie_sdk = ["opsgenie-sdk>=2.1.5"]
 oracle = [
     'cx_Oracle>=5.1.2',
 ]
@@ -635,7 +636,7 @@ PROVIDERS_REQUIREMENTS: Dict[str, List[str]] = {
     'neo4j': neo4j,
     'odbc': odbc,
     'openfaas': [],
-    'opsgenie': http_provider,
+    'opsgenie': opsgenie_sdk,
     'oracle': oracle,
     'pagerduty': pagerduty,
     'papermill': papermill,
