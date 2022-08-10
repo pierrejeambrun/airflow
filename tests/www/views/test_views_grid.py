@@ -126,17 +126,20 @@ def test_no_runs(admin_client, dag_without_runs):
     }
 
 
-def test_one_run(admin_client, dag_with_runs: List[DagRun], session):
+@pytest.mark.parametrize(
+    'run1_status, run1_expected_status', [(TaskInstanceState.SUCCESS, 'success'), (None, 'no_status')]
+)
+def test_one_run(admin_client, dag_with_runs: List[DagRun], session, run1_status, run1_expected_status):
     """
     Test a DAG with complex interaction of states:
-    - One run successful
-    - One run partly success, partly running
-    - One TI not yet finished
+    - Run 1 either fully success or fully no_status
+    - Run 2 partly success, partly running
+    - One TI not yet finished in Run 2
     """
     run1, run2 = dag_with_runs
 
     for ti in run1.task_instances:
-        ti.state = TaskInstanceState.SUCCESS
+        ti.state = run1_status
     for ti in sorted(run2.task_instances, key=lambda ti: (ti.task_id, ti.map_index)):
         if ti.task_id == "task1":
             ti.state = TaskInstanceState.SUCCESS
@@ -200,7 +203,7 @@ def test_one_run(admin_client, dag_with_runs: List[DagRun], session):
                             'run_id': 'run_1',
                             'start_date': None,
                             'end_date': None,
-                            'state': 'success',
+                            'state': run1_expected_status,
                             'task_id': 'task1',
                             'try_number': 1,
                         },
@@ -226,10 +229,10 @@ def test_one_run(admin_client, dag_with_runs: List[DagRun], session):
                             'instances': [
                                 {
                                     'run_id': 'run_1',
-                                    'mapped_states': {'success': 4},
+                                    'mapped_states': {run1_expected_status: 4},
                                     'start_date': None,
                                     'end_date': None,
-                                    'state': 'success',
+                                    'state': run1_expected_status,
                                     'task_id': 'group.mapped',
                                 },
                                 {
@@ -252,7 +255,7 @@ def test_one_run(admin_client, dag_with_runs: List[DagRun], session):
                             'end_date': None,
                             'run_id': 'run_1',
                             'start_date': None,
-                            'state': 'success',
+                            'state': run1_expected_status,
                             'task_id': 'group',
                         },
                         {

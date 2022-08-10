@@ -270,12 +270,14 @@ def dag_to_grid(dag, dag_runs, session):
     Create a nested dict representation of the DAG's TaskGroup and its children
     used to construct the Graph and Grid views.
     """
+    empty_state_value = 'no_status'
+
     query = (
         session.query(
             TaskInstance.task_id,
             TaskInstance.run_id,
-            TaskInstance.state,
-            sqla.func.count(sqla.func.coalesce(TaskInstance.state, sqla.literal('no_status'))).label(
+            sqla.func.coalesce(TaskInstance.state, sqla.literal(empty_state_value)).label('state'),
+            sqla.func.count(sqla.func.coalesce(TaskInstance.state, sqla.literal(empty_state_value))).label(
                 'state_count'
             ),
             sqla.func.min(TaskInstance.start_date).label('start_date'),
@@ -291,6 +293,8 @@ def dag_to_grid(dag, dag_runs, session):
     )
 
     grouped_tis = {task_id: list(tis) for task_id, tis in itertools.groupby(query, key=lambda ti: ti.task_id)}
+
+    priority_without_none = [s or empty_state_value for s in wwwutils.priority]
 
     def task_group_to_grid(item, dag_runs, grouped_tis):
         if isinstance(item, AbstractOperator):
@@ -316,18 +320,16 @@ def dag_to_grid(dag, dag_runs, session):
                 record = None
 
                 def set_overall_state(record):
-                    for state in wwwutils.priority:
+                    for state in priority_without_none:
                         if state in record['mapped_states']:
                             record['state'] = state
                             break
                     if None in record['mapped_states']:
-                        # When turnong the dict into JSON we can't have None as a key, so use the string that
-                        # the UI does
-                        record['mapped_states']['no_status'] = record['mapped_states'].pop(None)
+                        # When turning the dict into JSON we can't have None as a key,
+                        # so use the string that the UI does
+                        record['mapped_states']['empty_state_value'] = record['mapped_states'].pop(None)
 
                 for ti_summary in ti_summaries:
-                    if ti_summary.state is None:
-                        ti_summary.state == 'no_status'
                     if run_id != ti_summary.run_id:
                         run_id = ti_summary.run_id
                         if record:
@@ -385,8 +387,8 @@ def dag_to_grid(dag, dag_runs, session):
             children_end_dates = (item['end_date'] for item in child_instances if item)
             children_states = {item['state'] for item in child_instances if item}
 
-            group_state = None
-            for state in wwwutils.priority:
+            group_state = empty_state_value
+            for state in priority_without_none:
                 if state in children_states:
                     group_state = state
                     break
