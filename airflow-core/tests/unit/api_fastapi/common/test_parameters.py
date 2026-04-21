@@ -30,7 +30,6 @@ from airflow.api_fastapi.common.parameters import (
     _PrefixPatternParam,
     _PrefixSearchParam,
     _SearchParam,
-    _TaskDisplayNamePatternParam,
     _TaskDisplayNamePrefixPatternParam,
     filter_param_factory,
 )
@@ -234,39 +233,6 @@ class TestPrefixSearchParam:
         statement = select(DagModel)
         result = param.to_orm(statement)
         assert result is statement
-
-
-class TestTaskDisplayNamePatternParam:
-    """Substring filter on ``coalesce(_task_display_property_value, task_id)``."""
-
-    def test_to_orm_single_value(self):
-        param = _TaskDisplayNamePatternParam().set_value("test_task")
-        statement = select(TaskInstance)
-        statement = param.to_orm(statement)
-
-        sql = _compile(statement)
-        assert _has_ilike(sql, "test_task")
-
-    def test_to_orm_empty_matches_all(self):
-        # `~` is aliased to `%` and will therefore match any non-null display name.
-        param = _TaskDisplayNamePatternParam()
-        aliased = param.transform_aliases("~")
-        param.set_value(aliased)
-        statement = select(TaskInstance)
-        statement = param.to_orm(statement)
-
-        sql = _compile(statement)
-        assert _has_ilike(sql, "%")
-
-    def test_to_orm_multiple_values_or(self):
-        param = _TaskDisplayNamePatternParam().set_value("first_task | second_task")
-        statement = select(TaskInstance)
-        statement = param.to_orm(statement)
-
-        sql = _compile(statement)
-        assert "or" in sql
-        assert _has_ilike(sql, "first_task")
-        assert _has_ilike(sql, "second_task")
 
 
 class TestTaskDisplayNamePrefixPatternParam:

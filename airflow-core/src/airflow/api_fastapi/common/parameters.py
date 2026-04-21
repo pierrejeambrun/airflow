@@ -269,61 +269,6 @@ class _PrefixSearchParam(_PrefixPatternParam):
         raise NotImplementedError("Use prefix_search_param_factory instead, depends is not implemented.")
 
 
-class _TaskDisplayNamePatternParam(BaseParam[str]):
-    """
-    Substring filter on :attr:`TaskInstance.task_display_name` (``coalesce``) using ``ILIKE``.
-
-    .. note::
-        Like :class:`_SearchParam`, this full-match substring search most of the time
-        prevents the database from using B-tree indexes and can be very slow on large
-        tables. Prefer :class:`_TaskDisplayNamePrefixPatternParam` (the
-        ``task_display_name_prefix_pattern`` query-param counterpart) when possible.
-    """
-
-    def to_orm(self, select: Select) -> Select:
-        if self.value is None and self.skip_none:
-            return select
-
-        val_str = str(self.value)
-        # task_display_name is a hybrid property (``coalesce(_task_display_property_value, task_id)``),
-        # which mypy reports as an overloaded function; ilike is available at runtime on the column.
-        if "|" in val_str:
-            search_terms = [term.strip() for term in val_str.split("|") if term.strip()]
-            if search_terms:
-                return select.where(
-                    or_(
-                        *(
-                            TaskInstance.task_display_name.ilike(f"%{term}%")  # type: ignore[attr-defined]
-                            for term in search_terms
-                        )
-                    )
-                )
-
-        return select.where(TaskInstance.task_display_name.ilike(f"%{val_str}%"))  # type: ignore[attr-defined]
-
-    def transform_aliases(self, value: str | None) -> str | None:
-        if value == "~":
-            value = "%"
-        return value
-
-    @classmethod
-    def depends(
-        cls,
-        task_display_name_pattern: str | None = Query(
-            default=None,
-            description=(
-                "Substring match on task display name (case-insensitive ``ILIKE '%value%'``). "
-                "Use ``|`` for OR. Use ``~`` to match all.\n\n"
-                "**Performance note:** this full-match pattern most of the time prevents the "
-                "database from using B-tree indexes, which can be very slow on large tables. "
-                "Prefer ``task_display_name_prefix_pattern`` when possible."
-            ),
-        ),
-    ) -> Self:
-        param = cls()
-        return param.set_value(param.transform_aliases(task_display_name_pattern))
-
-
 class _TaskDisplayNamePrefixPatternParam(_PrefixPatternParam):
     """
     Prefix filter equivalent to :attr:`TaskInstance.task_display_name`, rewritten for composite-index use.
@@ -1253,7 +1198,8 @@ QueryTIExecutorFilter = Annotated[
     ),
 ]
 QueryTITaskDisplayNamePatternSearch = Annotated[
-    _TaskDisplayNamePatternParam, Depends(_TaskDisplayNamePatternParam.depends)
+    _SearchParam,
+    Depends(search_param_factory(TaskInstance.task_display_name, "task_display_name_pattern")),
 ]
 QueryTITaskDisplayNamePrefixPatternSearch = Annotated[
     _TaskDisplayNamePrefixPatternParam, Depends(_TaskDisplayNamePrefixPatternParam.depends)
