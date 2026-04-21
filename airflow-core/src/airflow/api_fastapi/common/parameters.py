@@ -195,7 +195,7 @@ class _PrefixPatternParam(BaseParam[str], ABC):
         val_str = str(self.value)
         if "|" in val_str:
             search_terms = [term.strip() for term in val_str.split("|") if term.strip()]
-            if len(search_terms) > 1:
+            if search_terms:
                 return select.where(or_(*(self._prefix_clause(term) for term in search_terms)))
 
         return select.where(self._prefix_clause(val_str))
@@ -206,8 +206,51 @@ class _PrefixPatternParam(BaseParam[str], ABC):
         return value
 
 
-class _SearchParam(_PrefixPatternParam):
-    """Prefix search on a column using range comparison (case-sensitive, index-friendly)."""
+class _SearchParam(BaseParam[str]):
+    """
+    Substring search on a column using ``ILIKE '%term%'`` (case-insensitive).
+
+    .. note::
+        This full-match substring search most of the time prevents the database
+        from using B-tree indexes on ``attribute``, which can be very slow on
+        large tables. Prefer :class:`_PrefixSearchParam` (the ``*_prefix_pattern``
+        query-param counterpart) when matching from the beginning of the value
+        is acceptable.
+    """
+
+    def __init__(self, attribute: ColumnElement, skip_none: bool = True) -> None:
+        super().__init__(skip_none=skip_none)
+        self.attribute: ColumnElement = attribute
+
+    def to_orm(self, select: Select) -> Select:
+        if self.value is None and self.skip_none:
+            return select
+
+        val_str = str(self.value)
+        if "|" in val_str:
+            search_terms = [term.strip() for term in val_str.split("|") if term.strip()]
+            if search_terms:
+                return select.where(or_(*(self.attribute.ilike(f"%{term}%") for term in search_terms)))
+
+        return select.where(self.attribute.ilike(f"%{val_str}%"))
+
+    def transform_aliases(self, value: str | None) -> str | None:
+        if value == "~":
+            value = "%"
+        return value
+
+    @classmethod
+    def depends(cls, *args: Any, **kwargs: Any) -> Self:
+        raise NotImplementedError("Use search_param_factory instead , depends is not implemented.")
+
+
+class _PrefixSearchParam(_PrefixPatternParam):
+    """
+    Prefix search on a column using range comparison (case-sensitive, index-friendly).
+
+    Unlike :class:`_SearchParam`, wildcard characters are treated as literals and the query
+    plan can use a B-tree index on ``attribute`` for the range scan.
+    """
 
     def __init__(self, attribute: ColumnElement, skip_none: bool = True) -> None:
         super().__init__(skip_none=skip_none)
@@ -223,10 +266,65 @@ class _SearchParam(_PrefixPatternParam):
 
     @classmethod
     def depends(cls, *args: Any, **kwargs: Any) -> Self:
-        raise NotImplementedError("Use search_param_factory instead , depends is not implemented.")
+        raise NotImplementedError("Use prefix_search_param_factory instead, depends is not implemented.")
 
 
-class _TaskDisplayNamePatternParam(_PrefixPatternParam):
+class _TaskDisplayNamePatternParam(BaseParam[str]):
+    """
+    Substring filter on :attr:`TaskInstance.task_display_name` (``coalesce``) using ``ILIKE``.
+
+    .. note::
+        Like :class:`_SearchParam`, this full-match substring search most of the time
+        prevents the database from using B-tree indexes and can be very slow on large
+        tables. Prefer :class:`_TaskDisplayNamePrefixPatternParam` (the
+        ``task_display_name_prefix_pattern`` query-param counterpart) when possible.
+    """
+
+    def to_orm(self, select: Select) -> Select:
+        if self.value is None and self.skip_none:
+            return select
+
+        val_str = str(self.value)
+        # task_display_name is a hybrid property (``coalesce(_task_display_property_value, task_id)``),
+        # which mypy reports as an overloaded function; ilike is available at runtime on the column.
+        if "|" in val_str:
+            search_terms = [term.strip() for term in val_str.split("|") if term.strip()]
+            if search_terms:
+                return select.where(
+                    or_(
+                        *(
+                            TaskInstance.task_display_name.ilike(f"%{term}%")  # type: ignore[attr-defined]
+                            for term in search_terms
+                        )
+                    )
+                )
+
+        return select.where(TaskInstance.task_display_name.ilike(f"%{val_str}%"))  # type: ignore[attr-defined]
+
+    def transform_aliases(self, value: str | None) -> str | None:
+        if value == "~":
+            value = "%"
+        return value
+
+    @classmethod
+    def depends(
+        cls,
+        task_display_name_pattern: str | None = Query(
+            default=None,
+            description=(
+                "Substring match on task display name (case-insensitive ``ILIKE '%value%'``). "
+                "Use ``|`` for OR. Use ``~`` to match all.\n\n"
+                "**Performance note:** this full-match pattern most of the time prevents the "
+                "database from using B-tree indexes, which can be very slow on large tables. "
+                "Prefer ``task_display_name_prefix_pattern`` when possible."
+            ),
+        ),
+    ) -> Self:
+        param = cls()
+        return param.set_value(param.transform_aliases(task_display_name_pattern))
+
+
+class _TaskDisplayNamePrefixPatternParam(_PrefixPatternParam):
     """
     Prefix filter equivalent to :attr:`TaskInstance.task_display_name`, rewritten for composite-index use.
 
@@ -265,18 +363,19 @@ class _TaskDisplayNamePatternParam(_PrefixPatternParam):
     @classmethod
     def depends(
         cls,
-        task_display_name_pattern: str | None = Query(
+        task_display_name_prefix_pattern: str | None = Query(
             default=None,
             description=(
                 "Prefix match on task display name: optional ``_task_display_property_value`` else "
-                "``task_id`` (same as ``coalesce``). Case-sensitive. On large databases, combine with "
-                "``dag_id_pattern`` (or a specific DAG in the path) so ``(dag_id, task_id, ...)`` indexes "
-                "apply. Use ``|`` for OR. Use ``~`` to match all."
+                "``task_id`` (same as ``coalesce``). Case-sensitive. Index-friendly alternative to "
+                "``task_display_name_pattern``. On large databases, combine with ``dag_id_prefix_pattern`` "
+                "(or a specific DAG in the path) so ``(dag_id, task_id, ...)`` indexes apply. "
+                "Use ``|`` for OR. Use ``~`` to match all."
             ),
         ),
     ) -> Self:
         param = cls()
-        return param.set_value(param.transform_aliases(task_display_name_pattern))
+        return param.set_value(param.transform_aliases(task_display_name_prefix_pattern))
 
 
 class QueryTaskInstanceTaskGroupFilter(BaseParam[str]):
@@ -336,9 +435,14 @@ def search_param_factory(
     skip_none: bool = True,
 ) -> Callable[[str | None], _SearchParam]:
     DESCRIPTION = (
-        "Prefix match — returns items whose value starts with the given string "
-        "(case-sensitive, index-friendly). Use the pipe `|` operator for OR logic "
-        "(e.g. `dag1|dag2`). Use `~` to match all."
+        "SQL LIKE expression — use `%` / `_` wildcards (e.g. `%customer_%`). "
+        "or the pipe `|` operator for OR logic (e.g. `dag1 | dag2`). "
+        "Regular expressions are **not** supported. "
+        "\n\n"
+        "**Performance note:** this full-match pattern is evaluated as ``ILIKE '%term%'`` and "
+        "most of the time prevents the database from using B-tree indexes, which can be very "
+        "slow on large tables. Prefer the equivalent "
+        f"``{pattern_name.replace('_pattern', '_prefix_pattern')}`` parameter when possible."
     )
 
     def depends_search(
@@ -349,6 +453,34 @@ def search_param_factory(
         return search_parm.set_value(value)
 
     return depends_search
+
+
+def prefix_search_param_factory(
+    attribute: ColumnElement,
+    prefix_pattern_name: str,
+    skip_none: bool = True,
+) -> Callable[[str | None], _PrefixSearchParam]:
+    """
+    Build a FastAPI ``Depends`` returning a :class:`_PrefixSearchParam` for prefix matching.
+
+    Prefer this over :func:`search_param_factory` for performance: prefix matching uses a
+    B-tree index range scan, while substring matching requires a full table scan.
+    """
+    DESCRIPTION = (
+        "Prefix match — returns items whose value starts with the given string "
+        "(case-sensitive, index-friendly). Use the pipe `|` operator for OR logic "
+        "(e.g. `dag1|dag2`). Use `~` to match all. Wildcard characters (`%`, `_`) "
+        "are treated as literal characters."
+    )
+
+    def depends_prefix_search(
+        value: str | None = Query(alias=prefix_pattern_name, default=None, description=DESCRIPTION),
+    ) -> _PrefixSearchParam:
+        search_parm = _PrefixSearchParam(attribute, skip_none)
+        value = search_parm.transform_aliases(value)
+        return search_parm.set_value(value)
+
+    return depends_prefix_search
 
 
 class SortParam(BaseParam[list[str]]):
@@ -813,8 +945,15 @@ QueryExcludeStaleFilter = Annotated[_ExcludeStaleFilter, Depends(_ExcludeStaleFi
 QueryDagIdPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(DagModel.dag_id, "dag_id_pattern"))
 ]
+QueryDagIdPrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(DagModel.dag_id, "dag_id_prefix_pattern"))
+]
 QueryDagDisplayNamePatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(DagModel.dag_display_name, "dag_display_name_pattern"))
+]
+QueryDagDisplayNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(DagModel.dag_display_name, "dag_display_name_prefix_pattern")),
 ]
 QueryBundleNameFilter = Annotated[
     FilterParam[str | None],
@@ -826,6 +965,10 @@ QueryBundleVersionFilter = Annotated[
 ]
 QueryDagIdPatternSearchWithNone = Annotated[
     _SearchParam, Depends(search_param_factory(DagModel.dag_id, "dag_id_pattern", False))
+]
+QueryDagIdPrefixPatternSearchWithNone = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(DagModel.dag_id, "dag_id_prefix_pattern", False)),
 ]
 QueryTagsFilter = Annotated[_TagsFilter, Depends(_TagsFilter.depends)]
 QueryOwnersFilter = Annotated[_OwnersFilter, Depends(_OwnersFilter.depends)]
@@ -1024,13 +1167,24 @@ QueryDagRunRunTypesFilter = Annotated[
 QueryDagRunTriggeringUserSearch = Annotated[
     _SearchParam, Depends(search_param_factory(DagRun.triggering_user_name, "triggering_user"))
 ]
+QueryDagRunTriggeringUserPrefixSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(DagRun.triggering_user_name, "triggering_user_prefix")),
+]
 QueryDagRunPartitionKeySearch = Annotated[
     _SearchParam, Depends(search_param_factory(DagRun.partition_key, "partition_key_pattern"))
+]
+QueryDagRunPartitionKeyPrefixSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(DagRun.partition_key, "partition_key_prefix_pattern")),
 ]
 
 # DagTags
 QueryDagTagPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(DagTag.name, "tag_name_pattern"))
+]
+QueryDagTagPrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(DagTag.name, "tag_name_prefix_pattern"))
 ]
 
 
@@ -1077,10 +1231,18 @@ QueryTIPoolNamePatternSearch = Annotated[
     _SearchParam,
     Depends(search_param_factory(TaskInstance.pool, "pool_name_pattern")),
 ]
+QueryTIPoolNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(TaskInstance.pool, "pool_name_prefix_pattern")),
+]
 
 QueryTIQueueNamePatternSearch = Annotated[
     _SearchParam,
     Depends(search_param_factory(TaskInstance.queue, "queue_name_pattern")),
+]
+QueryTIQueueNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(TaskInstance.queue, "queue_name_prefix_pattern")),
 ]
 QueryTIExecutorFilter = Annotated[
     FilterParam[list[str]],
@@ -1092,6 +1254,9 @@ QueryTIExecutorFilter = Annotated[
 ]
 QueryTITaskDisplayNamePatternSearch = Annotated[
     _TaskDisplayNamePatternParam, Depends(_TaskDisplayNamePatternParam.depends)
+]
+QueryTITaskDisplayNamePrefixPatternSearch = Annotated[
+    _TaskDisplayNamePrefixPatternParam, Depends(_TaskDisplayNamePrefixPatternParam.depends)
 ]
 QueryTITaskGroupFilter = Annotated[
     QueryTaskInstanceTaskGroupFilter, Depends(QueryTaskInstanceTaskGroupFilter.depends)
@@ -1145,6 +1310,15 @@ QueryTIOperatorNamePatternSearch = Annotated[
         )
     ),
 ]
+QueryTIOperatorNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(
+        prefix_search_param_factory(
+            TaskInstance.custom_operator_name,
+            "operator_name_prefix_pattern",
+        )
+    ),
+]
 
 QueryTIMapIndexFilter = Annotated[
     FilterParam[list[int]],
@@ -1159,24 +1333,46 @@ QueryTIMapIndexFilter = Annotated[
 QueryXComKeyPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(XComModel.key, "xcom_key_pattern"))
 ]
+QueryXComKeyPrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(XComModel.key, "xcom_key_prefix_pattern"))
+]
 
 QueryXComDagDisplayNamePatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(DagModel.dag_display_name, "dag_display_name_pattern"))
 ]
+QueryXComDagDisplayNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(DagModel.dag_display_name, "dag_display_name_prefix_pattern")),
+]
 QueryXComRunIdPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(XComModel.run_id, "run_id_pattern"))
 ]
+QueryXComRunIdPrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(XComModel.run_id, "run_id_prefix_pattern"))
+]
 QueryXComTaskIdPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(XComModel.task_id, "task_id_pattern"))
+]
+QueryXComTaskIdPrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(XComModel.task_id, "task_id_prefix_pattern"))
 ]
 
 # Assets
 QueryAssetNamePatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(AssetModel.name, "name_pattern"))
 ]
+QueryAssetNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(AssetModel.name, "name_prefix_pattern"))
+]
 QueryUriPatternSearch = Annotated[_SearchParam, Depends(search_param_factory(AssetModel.uri, "uri_pattern"))]
+QueryUriPrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(AssetModel.uri, "uri_prefix_pattern"))
+]
 QueryAssetAliasNamePatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(AssetAliasModel.name, "name_pattern"))
+]
+QueryAssetAliasNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(AssetAliasModel.name, "name_prefix_pattern"))
 ]
 QueryAssetDagIdPatternSearch = Annotated[
     _DagIdAssetReferenceFilter, Depends(_DagIdAssetReferenceFilter.depends)
@@ -1208,10 +1404,17 @@ QueryPartitionedDagRunDagIdFilter = Annotated[
 QueryVariableKeyPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(Variable.key, "variable_key_pattern"))
 ]
+QueryVariableKeyPrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(Variable.key, "variable_key_prefix_pattern")),
+]
 
 # Pools
 QueryPoolNamePatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(Pool.pool, "pool_name_pattern"))
+]
+QueryPoolNamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam, Depends(prefix_search_param_factory(Pool.pool, "pool_name_prefix_pattern"))
 ]
 
 
@@ -1243,6 +1446,10 @@ state_priority: list[None | TaskInstanceState] = [
 QueryConnectionIdPatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(Connection.conn_id, "connection_id_pattern"))
 ]
+QueryConnectionIdPrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(Connection.conn_id, "connection_id_prefix_pattern")),
+]
 
 # Human in the loop
 QueryHITLDetailDagIdPatternSearch = Annotated[
@@ -1254,12 +1461,30 @@ QueryHITLDetailDagIdPatternSearch = Annotated[
         )
     ),
 ]
+QueryHITLDetailDagIdPrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(
+        prefix_search_param_factory(
+            TaskInstance.dag_id,
+            "dag_id_prefix_pattern",
+        )
+    ),
+]
 QueryHITLDetailTaskIdPatternSearch = Annotated[
     _SearchParam,
     Depends(
         search_param_factory(
             TaskInstance.task_id,
             "task_id_pattern",
+        )
+    ),
+]
+QueryHITLDetailTaskIdPrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(
+        prefix_search_param_factory(
+            TaskInstance.task_id,
+            "task_id_prefix_pattern",
         )
     ),
 ]
@@ -1339,4 +1564,8 @@ QueryHITLDetailRespondedUserNameFilter = Annotated[
 # Parse Import Errors
 QueryParseImportErrorFilenamePatternSearch = Annotated[
     _SearchParam, Depends(search_param_factory(ParseImportError.filename, "filename_pattern"))
+]
+QueryParseImportErrorFilenamePrefixPatternSearch = Annotated[
+    _PrefixSearchParam,
+    Depends(prefix_search_param_factory(ParseImportError.filename, "filename_prefix_pattern")),
 ]

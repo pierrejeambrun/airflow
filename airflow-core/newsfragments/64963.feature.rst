@@ -1,0 +1,1 @@
+Add index-friendly ``*_prefix_pattern`` query parameters (e.g. ``dag_id_prefix_pattern``, ``run_id_prefix_pattern``) to all REST API list endpoints as faster, non-breaking alternatives to the existing substring ``*_pattern`` parameters.
